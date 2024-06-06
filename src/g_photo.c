@@ -7,14 +7,62 @@
 #include <sys/ioctl.h>
 #include <linux/videodev2.h>
 #include <sys/mman.h>
+#include <getopt.h>
 
 #define WIDTH     640
 #define HEIGHT    480
+
+int list_controls_requested = 0;
 
 struct buffer {
    void *start;
    size_t length;
 };
+
+struct v4l2_capability_info {
+   __u32 capability;
+   const char *name;
+};
+
+const struct v4l2_capability_info cap_info[] = {
+   {V4L2_CAP_VIDEO_CAPTURE, "Video capture device"},
+   {V4L2_CAP_VIDEO_OUTPUT, "Video output device"},
+   {V4L2_CAP_VIDEO_OVERLAY, "Video overlay"},
+   {V4L2_CAP_VBI_CAPTURE, "Raw VBI capture device"},
+   {V4L2_CAP_VBI_OUTPUT, "Raw VBI output device"},
+   {V4L2_CAP_SLICED_VBI_CAPTURE, "Sliced VBI capture device"},
+   {V4L2_CAP_SLICED_VBI_OUTPUT, "Sliced VBI output device"},
+   {V4L2_CAP_RDS_CAPTURE, "RDS data capture"},
+   {V4L2_CAP_VIDEO_OUTPUT_OVERLAY, "Video output overlay"},
+   {V4L2_CAP_HW_FREQ_SEEK, "Hardware frequency seeking"},
+   {V4L2_CAP_RDS_OUTPUT, "RDS encoder"},
+   {V4L2_CAP_VIDEO_CAPTURE_MPLANE, "Vid cap device supports multiplanar formats"},
+   {V4L2_CAP_VIDEO_OUTPUT_MPLANE, "Vid out device supports multiplanar formats"},
+   {V4L2_CAP_VIDEO_M2M_MPLANE, "mem-to-mem device supports multiplanar formats"},
+   {V4L2_CAP_VIDEO_M2M, "mem-to-mem device"},
+   {V4L2_CAP_TUNER, "Has a tuner"},
+   {V4L2_CAP_AUDIO, "Audio support"},
+   {V4L2_CAP_RADIO, "Radio device"},
+   {V4L2_CAP_MODULATOR, "Has modulator"},
+   {V4L2_CAP_SDR_CAPTURE, "SDR capture device"},
+   {V4L2_CAP_EXT_PIX_FORMAT, "Supports extended pixel format"},
+   {V4L2_CAP_SDR_OUTPUT, "SDR output device"},
+   //{V4L2_CAP_META_CAPTURE, "Metadata capture device"}, /*NOT IN OUR KERNEL*/
+   {V4L2_CAP_READWRITE, "R/W system calls"},
+   {V4L2_CAP_ASYNCIO, "Asynchronus I/O"}, //deprecated in latest kernel version as of 2024-06-06 - remove if updated
+   {V4L2_CAP_STREAMING, "Streaming I/O ioctls"},
+   //{V4L2_CAP_META_OUTPUT, "Metadata output device"}, /*NOT IN OUR KERNEL*/
+   {V4L2_CAP_TOUCH, "Touch capable"},
+   //{V4L2_CAP_IO_MC, "I//O controlled by media controller"} /*NOT IN OUR KERNEL*/
+   //{V4L2_CAP_DEVICE_CAPS, "Set device caps"} /*might break something, dont use it*/
+};
+
+void usage(char *program_name) {
+   printf("Usage: %s [-lc]\n", program_name);
+   printf("Options:\n");
+   printf("\t-lc\tList available controls\n");
+   exit(EXIT_FAILURE);
+}
 
 int xioctl(int fd, int request, void *arg) {
    int r;
@@ -27,7 +75,62 @@ int xioctl(int fd, int request, void *arg) {
    return r;
 }
 
-int main() {
+void print_capabilities(__u32 caps) {
+   for (size_t i=0; i < sizeof(cap_info) / sizeof(cap_info[0]); ++i) {
+      if (caps & cap_info[i].capability) {
+         printf("\t%s\n", cap_info[i].name);
+      }
+   }
+}
+
+void print_control_value(int fd, __u32 controlId) {
+   struct v4l2_control control;
+   memset(&control, 0, sizeof(control));
+   control.id = controlId;
+
+   if (ioctl(fd, VIDIOC_G_CTRL, &control) == -1) {
+      perror("VIDIOC_G_CTRL");
+      return;
+   }
+
+   printf("\t- Current: %d\n\n", control.value);
+}
+
+void list_controls(int fd) {
+   struct v4l2_queryctrl queryctrl;
+   memset(&queryctrl, 0, sizeof(queryctrl));
+   queryctrl.id = V4L2_CTRL_FLAG_NEXT_CTRL; //Start with first control
+
+   printf("Supported controls:\n");
+
+   do {
+      if (ioctl(fd, VIDIOC_QUERYCTRL, &queryctrl) == -1) {
+         return; //eventually we run out of next ctrls, just return and ignore errno
+      }
+      printf("\t%s\n", queryctrl.name);
+      //printf("\t- ID: %d\n", queryctrl.id);
+      printf("\t- Min: %d, Max: %d, Step: %d\n",
+            queryctrl.minimum, queryctrl.maximum, queryctrl.step);
+      print_control_value(fd, queryctrl.id);
+      
+      queryctrl.id |= V4L2_CTRL_FLAG_NEXT_CTRL;
+   } while (queryctrl.id != V4L2_CTRL_FLAG_NEXT_CTRL);
+}
+
+int main(int argc, char *argv[]) {
+   //Parse cli args
+   int opt;
+   while ((opt = getopt(argc, argv, "lc")) != -1) {
+      switch (opt) {
+         case 'l':
+         case 'c':
+            list_controls_requested = 1;
+            break;
+         default:
+            usage(argv[0]);
+      }
+   }
+
    //Open device 'file'
    const char *dev_name = "/dev/video0";
    int fd = open(dev_name, O_RDWR);
@@ -36,20 +139,31 @@ int main() {
       return 1;
    }
 
-   //Get the device capabilities
-   struct v4l2_capability cap;
-   if (xioctl(fd, VIDIOC_QUERYCAP, &cap) == -1) {
-      perror("Error querying capabilities");
-      close(fd);
-      return 1;
+   //List available controls
+   if (list_controls_requested) {
+      //Get the device capabilities
+      struct v4l2_capability cap;
+      if (xioctl(fd, VIDIOC_QUERYCAP, &cap) == -1) {
+         perror("Error querying capabilities");
+         close(fd);
+         return 1;
+      }
+      //Print device capabilities for debugging
+      printf("-------------\n");
+      printf("Driver: %s\n", cap.driver);
+      printf("Card: %s\n", cap.card);
+      printf("Bus info: %s\n", cap.bus_info);
+      printf("Version: %u.%u.%u\n",
+               (cap.version >> 16) & 0xFF,
+               (cap.version >> 8) & 0xFF,
+               cap.version & 0xFF);
+      //Print capabilities list
+      printf("Driver capabilities:\n");
+      print_capabilities(cap.capabilities);
+      printf("\n-------------\n");
+      list_controls(fd);
+      printf("-------------\n");
    }
-
-   //Print device capabilities for debugging
-   printf("\n-------------\n");
-   printf("Driver: %s\n", cap.driver);
-   printf("Card: %s\n", cap.card);
-   printf("Bus info: %s\n", cap.bus_info);
-   printf("-------------\n");
 
    //Setup v4l2 pixel format
    printf("\n-------------\n");
@@ -211,9 +325,9 @@ int main() {
       return 1;
    }
    fwrite(buffer.start, 1, buf.bytesused, out_fp);
-   fclose(out_fp);
 
-   //Cleanup memory & fd
+   //Cleanup memory & files
+   fclose(out_fp);
    munmap(buffer.start, buffer.length);
    close(fd);
 
